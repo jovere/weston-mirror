@@ -3035,6 +3035,27 @@ rdp_rail_hide_unmapped_window(struct weston_surface *surface)
 	rail_state->taskbarButton = window_state_order.TaskbarButton;
 }
 
+/* A surface can be visible without being flagged as mapped itself:
+ * libweston-desktop maps the views of transient children (such as X11
+ * tooltips and hover popups) without setting is_mapped on their surface.
+ * Only treat a surface as unmapped if none of its views is mapped either.
+ */
+static bool
+rdp_rail_surface_is_unmapped(struct weston_surface *surface)
+{
+	struct weston_view *view;
+
+	if (weston_surface_is_mapped(surface))
+		return false;
+
+	wl_list_for_each(view, &surface->views, surface_link) {
+		if (weston_view_is_mapped(view))
+			return false;
+	}
+
+	return true;
+}
+
 static void
 rdp_rail_hide_unmapped_window_iter(void *element, void *data)
 {
@@ -3052,7 +3073,7 @@ rdp_rail_hide_unmapped_window_iter(void *element, void *data)
 	    rail_state->window_id &&
 	    rail_state->isWindowCreated &&
 	    rail_state->output &&
-	    !weston_surface_is_mapped(surface))
+	    rdp_rail_surface_is_unmapped(surface))
 		rdp_rail_hide_unmapped_window(surface);
 }
 

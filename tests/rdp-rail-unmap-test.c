@@ -94,6 +94,7 @@ shown_window_init(struct fixture *f, struct weston_surface *surface,
 	surface->compositor = &f->compositor;
 	surface->backend_state = rail_state;
 	surface->is_mapped = true;
+	wl_list_init(&surface->views);
 
 	ZUC_ASSERT_TRUE(rdp_id_manager_allocate_id(&f->context.windowId,
 						   surface,
@@ -176,5 +177,39 @@ ZUC_TEST(rdp_rail_unmap, mapped_and_ineligible_windows_left_alone)
 	rdp_id_manager_free_id(&f.context.windowId, not_created_rs.window_id);
 	rdp_id_manager_free_id(&f.context.windowId, never_shown_rs.window_id);
 	rdp_id_manager_free_id(&f.context.windowId, failed_rs.window_id);
+	fixture_fini(&f);
+}
+
+ZUC_TEST(rdp_rail_unmap, transient_child_with_mapped_view_left_alone)
+{
+	struct fixture f;
+	struct weston_surface surface;
+	struct weston_surface_rail_state rail_state;
+	struct weston_view view = { 0 };
+
+	fixture_init(&f);
+	shown_window_init(&f, &surface, &rail_state);
+
+	/* libweston-desktop maps the view of a transient child, such as an
+	 * X11 tooltip, without setting is_mapped on its surface. */
+	surface.is_mapped = false;
+	view.surface = &surface;
+	view.is_mapped = true;
+	wl_list_insert(&surface.views, &view.surface_link);
+
+	rdp_rail_output_repaint(&f.output, NULL);
+
+	ZUC_ASSERT_EQ(0, window_updates.count);
+	ZUC_ASSERT_TRUE(rail_state.output == &f.output);
+
+	/* Once its view is unmapped as well, the window is hidden. */
+	view.is_mapped = false;
+	rdp_rail_output_repaint(&f.output, NULL);
+
+	ZUC_ASSERT_EQ(1, window_updates.count);
+	ZUC_ASSERT_EQ(WINDOW_HIDE, window_updates.show_state);
+
+	wl_list_remove(&view.surface_link);
+	rdp_id_manager_free_id(&f.context.windowId, rail_state.window_id);
 	fixture_fini(&f);
 }
