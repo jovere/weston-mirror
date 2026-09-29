@@ -10,6 +10,7 @@
 
 struct window_update_record {
 	int count;
+	int order;
 	UINT32 window_id;
 	UINT32 field_flags;
 	UINT32 show_state;
@@ -17,6 +18,16 @@ struct window_update_record {
 };
 
 static struct window_update_record window_updates;
+
+struct zorder_record {
+	int count;
+	int order;
+	UINT32 active_window_id;
+	UINT32 num_window_ids;
+};
+
+static struct zorder_record zorder_updates;
+static int order_counter;
 
 static BOOL
 stub_paint(rdpContext *context)
@@ -29,11 +40,29 @@ stub_window_update(rdpContext *context, const WINDOW_ORDER_INFO *order_info,
 		   const WINDOW_STATE_ORDER *window_state)
 {
 	window_updates.count++;
+	window_updates.order = ++order_counter;
 	window_updates.window_id = order_info->windowId;
 	window_updates.field_flags = order_info->fieldFlags;
 	window_updates.show_state = window_state->showState;
 	window_updates.taskbar_button = window_state->TaskbarButton;
 	return TRUE;
+}
+
+static BOOL
+stub_monitored_desktop(rdpContext *context, const WINDOW_ORDER_INFO *order_info,
+		       const MONITORED_DESKTOP_ORDER *monitored_desktop)
+{
+	zorder_updates.count++;
+	zorder_updates.order = ++order_counter;
+	zorder_updates.active_window_id = monitored_desktop->activeWindowId;
+	zorder_updates.num_window_ids = monitored_desktop->numWindowIds;
+	return TRUE;
+}
+
+static int
+stub_drain_output_buffer(freerdp_peer *peer)
+{
+	return 0;
 }
 
 struct fixture {
@@ -51,6 +80,8 @@ fixture_init(struct fixture *f)
 {
 	memset(f, 0, sizeof(*f));
 	memset(&window_updates, 0, sizeof(window_updates));
+	memset(&zorder_updates, 0, sizeof(zorder_updates));
+	order_counter = 0;
 
 	f->backend.compositor = &f->compositor;
 	f->backend.compositor_tid = rdp_get_tid();
@@ -66,6 +97,9 @@ fixture_init(struct fixture *f)
 	f->update.EndPaint = stub_paint;
 	f->update.window = &f->window_update;
 	f->window_update.WindowUpdate = stub_window_update;
+	f->window_update.MonitoredDesktop = stub_monitored_desktop;
+	f->peer.DrainOutputBuffer = stub_drain_output_buffer;
+	wl_list_init(&f->compositor.layer_list);
 
 	/* Leave the client more than one frame behind, so the regular
 	 * window update pass is throttled and only the hide pass runs. */
@@ -95,6 +129,7 @@ shown_window_init(struct fixture *f, struct weston_surface *surface,
 	surface->backend_state = rail_state;
 	surface->is_mapped = true;
 	wl_list_init(&surface->views);
+	wl_list_init(&surface->subsurface_list);
 
 	ZUC_ASSERT_TRUE(rdp_id_manager_allocate_id(&f->context.windowId,
 						   surface,
@@ -211,5 +246,48 @@ ZUC_TEST(rdp_rail_unmap, transient_child_with_mapped_view_left_alone)
 
 	wl_list_remove(&view.surface_link);
 	rdp_id_manager_free_id(&f.context.windowId, rail_state.window_id);
+	fixture_fini(&f);
+}
+
+ZUC_TEST(rdp_rail_unmap, zorder_sent_before_hide)
+{
+	struct fixture f;
+	struct weston_surface main_surface, popup;
+	struct weston_surface_rail_state main_rs, popup_rs;
+	struct weston_layer layer = { 0 };
+	struct weston_view main_view = { 0 };
+
+	fixture_init(&f);
+	f.backend.enable_window_zorder_sync = true;
+
+	shown_window_init(&f, &main_surface, &main_rs);
+	main_rs.showState = RDP_WINDOW_SHOW;
+	shown_window_init(&f, &popup, &popup_rs);
+
+	/* Only the main window is still in the scene graph: the popup was
+	 * unmapped, which removed its view from the layer. */
+	wl_list_init(&layer.view_list.link);
+	wl_list_insert(&f.compositor.layer_list, &layer.link);
+	main_view.surface = &main_surface;
+	main_view.is_mapped = true;
+	wl_list_insert(&layer.view_list.link, &main_view.layer_link.link);
+	wl_list_insert(&main_surface.views, &main_view.surface_link);
+
+	popup.is_mapped = false;
+	rdp_rail_output_repaint(&f.output, NULL);
+
+	/* The client learns that the main window is active before the popup,
+	 * which may be its active window, is hidden. */
+	ZUC_ASSERT_EQ(1, zorder_updates.count);
+	ZUC_ASSERT_EQ(main_rs.window_id, zorder_updates.active_window_id);
+	ZUC_ASSERT_EQ(1, zorder_updates.num_window_ids);
+	ZUC_ASSERT_EQ(1, window_updates.count);
+	ZUC_ASSERT_EQ(popup_rs.window_id, window_updates.window_id);
+	ZUC_ASSERT_TRUE(zorder_updates.order < window_updates.order);
+	ZUC_ASSERT_FALSE(f.context.is_window_zorder_dirty);
+
+	wl_list_remove(&main_view.surface_link);
+	rdp_id_manager_free_id(&f.context.windowId, main_rs.window_id);
+	rdp_id_manager_free_id(&f.context.windowId, popup_rs.window_id);
 	fixture_fini(&f);
 }

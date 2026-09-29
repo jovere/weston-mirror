@@ -3007,13 +3007,27 @@ rdp_rail_update_window(struct weston_surface *surface,
  * the surface is mapped again.
  */
 static void
+rdp_rail_sync_window_zorder(struct weston_compositor *compositor);
+
+static void
 rdp_rail_hide_unmapped_window(struct weston_surface *surface)
 {
 	struct rdp_backend *b = to_rdp_backend(surface->compositor);
+	RdpPeerContext *peer_ctx = (RdpPeerContext *)b->rdp_peer->context;
 	struct weston_surface_rail_state *rail_state = surface->backend_state;
 	WINDOW_ORDER_INFO window_order_info = {};
 	WINDOW_STATE_ORDER window_state_order = {};
 	rdpUpdate *update = b->rdp_peer->context->update;
+
+	/* If the window being hidden is the active one, the client activates
+	 * whichever window is next in its own z-order, which may belong to a
+	 * different application. Send the z-order first: the unmapped window
+	 * is no longer in it, so the client activates the window now on top
+	 * (normally the one the shell just gave keyboard focus to) instead.
+	 * rdp_rail_destroy_window() likewise marks the z-order dirty.
+	 */
+	rdp_rail_sync_window_zorder(surface->compositor);
+	peer_ctx->is_window_zorder_dirty = false;
 
 	window_order_info.windowId = rail_state->window_id;
 	window_order_info.fieldFlags = WINDOW_ORDER_TYPE_WINDOW |
